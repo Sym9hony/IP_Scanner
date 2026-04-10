@@ -1,11 +1,14 @@
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 
 namespace IP_Scanner
 {
     internal class Program
     {
+        record AliveHost(string Ip, string? Host, string? Mac, long Rtt, int? Ttl);
+
         static async Task Main()
         {
             Console.WriteLine($"Hostname: {Dns.GetHostName()}");
@@ -21,13 +24,7 @@ namespace IP_Scanner
                 if (nic.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
                 var props = nic.GetIPProperties();
                 foreach (var ua in props.UnicastAddresses) if (ua.Address.AddressFamily is AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) Console.WriteLine($"  [{nic.Name}] {ua.Address} ({nic.NetworkInterfaceType})");
-                
-            }
 
-            if (primary is null || primary.AddressFamily != AddressFamily.InterNetwork)
-            {
-                Console.WriteLine("\nNo IPv4 primary address — skipping subnet scan.");
-                return;
             }
 
             var octets = primary.GetAddressBytes();
@@ -39,14 +36,14 @@ namespace IP_Scanner
             var aliveHosts = await ScanRange(baseIp, s, e);
 
             Console.WriteLine("\nAlive hosts:");
-            foreach (var ip in aliveHosts) Console.WriteLine(ip);
-            
+            foreach (var h in aliveHosts) Console.WriteLine($"  [{h.Host ?? "<no rdns>"}] {h.Ip}  mac={h.Mac ?? "??:??:??:??:??:??"}  rtt={h.Rtt}ms  ttl={h.Ttl?.ToString() ?? "?"}");
+
         }
 
-        static async Task<List<string>> ScanRange(string baseIp, int start, int end)
+        static async Task<List<AliveHost>> ScanRange(string baseIp, int start, int end)
         {
-            var tasks = new List<Task<string?>>();
-            var semaphore = new SemaphoreSlim(50); 
+            var tasks = new List<Task<AliveHost?>>();
+            var semaphore = new SemaphoreSlim(50);
 
             for (int i = start; i <= end; i++)
             {
@@ -54,14 +51,19 @@ namespace IP_Scanner
 
                 await semaphore.WaitAsync();
 
-                tasks.Add(Task.Run(async () =>
+                tasks.Add(Task.Run(async () => // js doom
                 {
                     try
                     {
                         using (var ping = new Ping())
                         {
                             var reply = await ping.SendPingAsync(ip, 1000);
-                            if (reply.Status == IPStatus.Success) return ip;
+                            if (reply.Status == IPStatus.Success)
+                            {
+                                string? host = await TryReverseDns(ip);
+                                string? mac = TryGetMac(ip);
+                                return new AliveHost(ip, host, mac, reply.RoundtripTime, reply.Options?.Ttl);
+                            }
                         }
                     }
                     catch { }
@@ -74,9 +76,31 @@ namespace IP_Scanner
 
             var results = await Task.WhenAll(tasks);
 
-            var alive = new List<string>();
+            var alive = new List<AliveHost>();
             foreach (var result in results) if (result != null) alive.Add(result);
             return alive;
+        }
+
+        static async Task<string?> TryReverseDns(string ip)
+        {
+            try { return (await Dns.GetHostEntryAsync(ip)).HostName; }
+            catch { return null; }
+        }
+
+        [DllImport("iphlpapi.dll", ExactSpelling = true)]
+        static extern int SendARP(int destIp, int srcIp, byte[] macAddr, ref int macAddrLen);
+
+        static string? TryGetMac(string ip)
+        {
+            try
+            {
+                int destIp = BitConverter.ToInt32(IPAddress.Parse(ip).GetAddressBytes(), 0);
+                byte[] macBytes = new byte[6];
+                int len = macBytes.Length;
+                if (SendARP(destIp, 0, macBytes, ref len) != 0 || len == 0) return null;
+                return string.Join(":", macBytes.Take(len).Select(b => b.ToString("X2")));
+            }
+            catch { return null; }
         }
 
         private static IPAddress? GetPrimaryLocalIPv4()
