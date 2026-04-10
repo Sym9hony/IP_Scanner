@@ -1,7 +1,12 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+<<<<<<< HEAD
 using System.Runtime.InteropServices;
+=======
+using System.Text.RegularExpressions;
+>>>>>>> feat/Vendor-identification
 
 namespace IP_Scanner
 {
@@ -60,9 +65,16 @@ namespace IP_Scanner
                             var reply = await ping.SendPingAsync(ip, 1000);
                             if (reply.Status == IPStatus.Success)
                             {
+<<<<<<< HEAD
                                 string? host = await TryReverseDns(ip);
                                 string? mac = TryGetMac(ip);
                                 return new AliveHost(ip, host, mac, reply.RoundtripTime, reply.Options?.Ttl);
+=======
+                                var mac = GetMacAddress(ip);
+                                var vendor = GetVendor(mac);
+
+                                return $"{ip} | {mac ?? "no-mac"} | {vendor}";
+>>>>>>> feat/Vendor-identification
                             }
                         }
                     }
@@ -116,6 +128,52 @@ namespace IP_Scanner
             {
                 return null;
             }
+        }
+
+        static string? GetMacAddress(string ip)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "arp",
+                    Arguments = "-a",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using var process = Process.Start(psi);
+                string output = process!.StandardOutput.ReadToEnd();
+
+                var regex = new Regex($@"{ip}\s+([\-a-fA-F0-9]{{17}})");
+                var match = regex.Match(output);
+
+                if (match.Success)
+                    return match.Groups[1].Value;
+
+                return null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+        static string GetVendor(string? mac)
+        {
+            if (mac == null) return "unknown";
+
+            string prefix = mac.Substring(0, 8).ToUpper();
+                
+            var vendors = new Dictionary<string, string>
+            {
+                { "00-1A-2B", "Apple" },
+                { "FC-15-B4", "Microsoft" },
+                { "B8-27-EB", "Raspberry Pi" },
+                { "DC-A6-32", "Samsung" }
+            };
+
+            return vendors.TryGetValue(prefix, out var vendor) ? vendor : "unknown";
         }
     }
 }
