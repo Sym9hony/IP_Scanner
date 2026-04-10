@@ -6,7 +6,7 @@ namespace IP_Scanner
 {
     internal class Program
     {
-        static void Main(string[] args)
+        static async Task Main()
         {
             Console.WriteLine($"Hostname: {Dns.GetHostName()}");
             Console.WriteLine();
@@ -31,6 +31,74 @@ namespace IP_Scanner
                     }
                 }
             }
+
+            if (primary is null || primary.AddressFamily != AddressFamily.InterNetwork)
+            {
+                Console.WriteLine("\nNo IPv4 primary address — skipping subnet scan.");
+                return;
+            }
+
+            // Derive /24 base from the primary IPv4 (e.g. 172.17.8.73 -> "172.17.8.")
+            var octets = primary.GetAddressBytes();
+            string baseIp = $"{octets[0]}.{octets[1]}.{octets[2]}.";
+            int start = 1;
+            int end = 254;
+
+            Console.WriteLine($"\n== Scanning {baseIp}{start}-{end} ==");
+            var aliveHosts = await ScanRange(baseIp, start, end);
+
+            Console.WriteLine("\nAlive hosts:");
+            foreach (var ip in aliveHosts)
+            {
+                Console.WriteLine(ip);
+            }
+        }
+
+        static async Task<List<string>> ScanRange(string baseIp, int start, int end)
+        {
+            var tasks = new List<Task<string?>>();
+            var semaphore = new SemaphoreSlim(50); // limit concurrency
+
+            for (int i = start; i <= end; i++)
+            {
+                string ip = baseIp + i;
+
+                await semaphore.WaitAsync();
+
+                tasks.Add(Task.Run(async () =>
+                {
+                    try
+                    {
+                        using (var ping = new Ping())
+                        {
+                            var reply = await ping.SendPingAsync(ip, 1000);
+
+                            if (reply.Status == IPStatus.Success)
+                            {
+                                return ip;
+                            }
+                        }
+                    }
+                    catch { }
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+
+                    return null;
+                }));
+            }
+
+            var results = await Task.WhenAll(tasks);
+
+            var alive = new List<string>();
+            foreach (var result in results)
+            {
+                if (result != null)
+                    alive.Add(result);
+            }
+
+            return alive;
         }
 
         private static IPAddress? GetPrimaryLocalIPv4()
